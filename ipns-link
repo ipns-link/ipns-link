@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Info: See `usage` funtion below
+
+export version=0.0.0
+
+usage(){
+  echo -e "\nBrief: Expose local http server through IPNS. Provides NAT-traversal too if needed"
+  echo -e "\nUsage: ipns-link [option] <port number>"
+  echo -e "\nOption: 
+  -c <path to the local IPFS repository>
+    Can also use IPFS_PATH env variable instead. Default: ~/.ipns-link
+  -g <public gateway url>
+    For list of gateways see the link below. Default: https://ipns-link.herokuapp.com
+  -v
+    Version
+  -h
+    Show help"
+  echo -e "\nFor more details, visit $(tput smul)https://github.com/SomajitDey/ipns-link$(tput rmul)\n"
+  exit
+} >&2 2>/dev/null; export -f usage
+
+dep_check(){
+  # Brief: Check major dependencies
+  local ipfs_version quit
+  if ipfs_version=$(ipfs version --number); then
+    local req_ipfs_ver=0.9.0 # Minimum ipfs-cli version required
+    [[ "$(echo -e "${ipfs_version}\n${req_ipfs_ver}" | sort -V | head -n1)" == "${req_ipfs_ver}" ]] || \
+      { echo -e "Required: go-ipfs-cli version >= ${req_ipfs_ver}\nSuggestion: ipfs update install latest\n"; quit="yes";}
+  else
+    echo -e "Required: go-ipfs-cli\nSource: https://docs.ipfs.io/install/command-line/#linux\n"
+    quit="yes"
+  fi
+  if ! command -v jq >/dev/null; then
+    echo -e "Required: jq\nSource: Native package repository"
+    echo -e "Ref: https://stedolan.github.io/jq/download/\n"
+    quit="yes"
+  fi
+  if ! command -v curl &>/dev/null; then
+    echo -e "Required: curl\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/curl\n"
+    quit="yes"
+  fi
+  [[ -v quit ]] && exit 1
+} >&2 2>/dev/null; export -f dep_check
+
+parse_cmdline(){
+  local OPTIND=1 opt
+  while getopts hvc:g: opt; do
+    case "${opt}" in
+      v) echo "${version}"; exit;;
+      c) export IPFS_PATH="${OPTARG}";;
+      g) local gateway="${OPTARG%/}";;
+      h|*) usage;;
+    esac
+  done
+  export web_port="${!OPTIND}"
+  ((web_port>0)) && ((web_port<65536)) || usage
+  export gateway="${gateway:=https://ipns-link.herokuapp.com}"
+}; export -f parse_cmdline
+
+aux_node_config(){
+  # Brief: Config the auxilliary node that reprovides the IPNS records of the main node at regular intervals
+  export aux_IPFS_PATH="${HOME}"/.ipns-link
+  export aux_pid_file="${aux_IPFS_PATH}/daemon-pid"
+  ( # Subshell provides isolation from main environment so that we can export IPFS_PATH
+    export IPFS_PATH="${aux_IPFS_PATH}"
+    if ! ipfs id; then
+      ipfs init --profile server # Disallow local discovery & private IP addresses
+      ipfs config Swarm.ConnMgr.Type none # Optimum no. of peers with no harm, because this node sleeps mostly
+    fi
+  )
+} &>/dev/null; export -f aux_node_config
+
+main_node_config(){
+  # Brief: Configure the isolated main node if not already online
+  export main_IPFS_PATH="${IPFS_PATH:-${aux_IPFS_PATH}/server}"
+  export main_node_ID="$(ipfs -c "${main_IPFS_PATH}" id -f='<id>')"
+  ( # Subshell provides isolation from main environment so that we can export IPFS_PATH
+    export IPFS_PATH="${main_IPFS_PATH}"
+    if [[ "$(ipfs config App)" != "ipns-link" ]]; then
+      ipfs swarm peers && return 1 # Error return because the currently online node has wrong configs
+      ipfs init --profile server || ipfs config profile apply server # Disallow local discovery & private IP addresses
+      ipfs config --json Experimental.Libp2pStreamMounting true # Enable libp2p streams - this is the main component
+      # NAT-traversal
+      ipfs config --bool Swarm.EnableRelayHop false
+      ipfs config --bool Swarm.DisableNatPortMap false
+      ipfs config --bool Swarm.Transports.Network.Relay true
+      ipfs config --bool Swarm.EnableAutoRelay true
+      # Connection Manager
+      ipfs config Swarm.ConnMgr.Type basic
+      ipfs config Swarm.ConnMgr.GracePeriod 60m0s
+      ipfs config --json Swarm.ConnMgr.LowWater 500
+      ipfs config --json Swarm.ConnMgr.HighWater 550
+      # Sign only after config is complete
+      ipfs config App ipns-link
+    fi
+  )
+} &>/dev/null; export -f main_node_config
+
+ipfs_daemon(){
+  # Brief: Launch ipfs-daemon with random ports and given options
+  # Usage: ipfs_daemon [options]
+  if ipfs swarm peers; then
+    if [[ "$(ipfs name pubsub state)" == enabled ]]; then 
+      return 0
+    else
+      return 1
+    fi
+  fi
+  ipfs config profile apply randomports; rm -f "${IPFS_PATH}/config-pre-randomports"*
+  pscan(){
+    # Brief: Give an unused, random, local TCP port except the one passed as argument
+    # Usage: pscan [port]
+    local port except="${1}"
+    while port="${RANDOM}";do # Max RANDOM=32767
+      ((port!=except)) || continue
+      nc -z localhost "${port}" || break
+    done
+    echo "${port}"
+  } 2>/dev/null; export -f pscan
+  local API_port="$(pscan)"; ipfs config Addresses.API "/ip4/127.0.0.1/tcp/${API_port}"
+  local gateway_port="$(pscan "${API_port}")"; ipfs config Addresses.Gateway "/ip4/127.0.0.1/tcp/${gateway_port}"
+  [[ "$((ipfs daemon "${@}" & echo $! >&3) | grep -iom1 'Daemon is ready' & tail -f --pid=$! /dev/null)" ]]
+} 3>&1 &>/dev/null; export -f ipfs_daemon
+
+resume_aux_node(){
+  # Brief: Resume/launch the aux node unconditionally. Lock, if any needs to be managed by the caller.
+  timeout 0.5 ipfs -c "${aux_IPFS_PATH}" swarm peers || \
+  if (( $? == 124 )); then
+    kill -CONT "$(<"${aux_pid_file}")"
+  else
+    IPFS_PATH="${aux_IPFS_PATH}" ipfs_daemon --enable-namesys-pubsub >"${aux_pid_file}"
+  fi
+} &>/dev/null; export -f resume_aux_node
+
+pause_aux_node(){
+  # Brief: Pause the aux node with SIGSTOP, when not in use.
+  flock "${aux_pid_file}" kill -STOP "$(<"${aux_pid_file}")"
+} &>/dev/null; export -f pause_aux_node
+
+dl_address(){
+  # Brief: Retrieve published multiaddress from IPNS. This also makes sure the following gateways cache the record
+  # Ref: https://ipfs.github.io/public-gateway-checker/
+  local nodeID="${main_node_ID}"
+  ( # Subshell keeps the following pipefail setting local to this function
+    set -o pipefail
+    (
+    curl -sf https://ipfs.io/ipns/"${nodeID}"/ || \
+    curl -sf https://gateway.ipfs.io/ipns/"${nodeID}"/ || \
+    curl -sf https://cloudfare-ipfs.com/ipns/"${nodeID}"/ || \
+    curl -sf https://gateway.pinata.cloud/ipns/"${nodeID}"/ || \
+    curl -sf https://hub.textile.io/ipns/"${nodeID}"/ || \
+    curl -sf https://ipfs.fleek.co/ipns/"${nodeID}"/
+    ) | sed -n '/<!--ipns-link--/,/--ipns-link-->/{//!p;}'
+  )
+} 2>/dev/null; export -f dl_address
+
+get_address(){
+  # Brief: Seek and output public multiaddress, if any
+  local local_addrs="$(ipfs -c "${main_IPFS_PATH}" diag sys | jq -r .net.interface_addresses[])"
+  until ipfs -c "${main_IPFS_PATH}" id -f="<addrs>\n" | grep -v "${local_addrs}"; do
+    sleep 1
+  done
+} 2>/dev/null; export -f get_address
+
+prep_record(){
+  # Brief: Prepare the IPNS record containing multiaddress and redirect
+  # Usage: prep_record <multiaddress> or prep_record <<< "${multiaddress}"
+  local multiaddress="${1:-"$(cat)"}" key=/ipns/"${main_node_ID}"
+  local redirect="${gateway}${key}/"
+  local post="
+<meta http-equiv=\"refresh\" content=\"0; url=${redirect}\">
+<title>Redirecting...</title>
+If you are not redirected automatically, follow this <a href='${redirect}'>link</a>
+<!--ipns-link--
+${multiaddress}
+--ipns-link-->" # Appending multiaddress to index.html makes the following inlining efficient
+  local cid="$(ipfs -c "${main_IPFS_PATH}" add --pin=false --inline --inline-limit=1000 -Q -w --stdin-name=index.html <<< "${post}")"
+  ipfs -c "${main_IPFS_PATH}" name publish -Q /ipfs/"${cid}" >/dev/null
+  ipfs -c "${main_IPFS_PATH}" dht get "${key}"
+} 2>/dev/null; export -f prep_record
+
+pub_record(){
+  # Brief: Publish IPNS record from STDIN using aux node. Wakes aux node up with SIGCONT if needed. Note the lock.
+  flock -s 3 # TODO: TBD: Does lock need to be exclusive
+  resume_aux_node && ipfs -c "${aux_IPFS_PATH}" dht put /ipns/"${main_node_ID}"
+} &>/dev/null 3<"${aux_pid_file}"; export -f pub_record
+
+log(){
+  date +%n%D\ %H:%M:%S:\ "${1}"%n
+} >&2 2>/dev/null; export -f log
+
+errexit(){
+  local msg="${1:-Unknown}"
+  echo -e "\nError: ${msg}\n"
+  exit 1
+} >&2; export -f errexit
+
+################################# Main #################################
+
+dep_check
+
+parse_cmdline "${@}"
+
+log "Configuring publisher node"
+aux_node_config || errexit # Must come before main_node_config as main_IPFS_PATH depends on aux_IPFS_PATH
+
+log "Configuring server node"
+main_node_config || errexit
+
+log "Launching server node"
+IPFS_PATH="${main_IPFS_PATH}" ipfs_daemon --routing=none --enable-namesys-pubsub || \
+  errexit "Failed. If daemon is running, do: `ipfs -c ${main_IPFS_PATH} shutdown` & retry"
+
+log "Exposing http server at localhost:${web_port}"
+if ipfs -c "${main_IPFS_PATH}" p2p listen --allow-custom-protocol /http /ip4/127.0.0.1/tcp/"${web_port}" &>/dev/null; then
+  echo -e "\nIPNS-name(PeerID): ${main_node_ID}\n"
+  base36_key="$(ipfs -c "${main_IPFS_PATH}" key list -l --ipns-base=base36 | grep 'self' | cut -d' ' -f1)"
+  echo -e "\nURL: $(tput smul)${gateway}/ipns/${base36_key}/*$(tput rmul)\n"
+else
+  errexit "Failed to forward incoming connections to localhost:${web_port}"
+fi >&2
+
+log "Launching publisher node"
+resume_aux_node
+
+log "Seeking public multiaddress (setting up NAT-traversal, if required)"
+while multiaddress="$(get_address)"; do
+  log "Publishing multiaddress at /ipns/${main_node_ID}"
+  prep_record "${multiaddress}" | pub_record
+  if [[ "$(dl_address)" == "${multiaddress}" ]]; then
+    log "Published"
+    ipfs -c "${main_IPFS_PATH}" stats bw >&2
+    pause_aux_node &
+    log "Publisher node sleeping for 15m before republishing"
+    sleep 15m
+  fi
+done
