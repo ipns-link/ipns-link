@@ -4,6 +4,16 @@
 
 Prototype implementation of [IPNS-Link](https://github.com/ipns-link/specs).
 
+## Table of Contents  
+[![tocgen](https://img.shields.io/badge/Generated%20using-tocgen-blue)](https://github.com/SomajitDey/tocgen)  
+  - [IPNS-Link](#ipns-link)  
+      - [Usage](#usage)  
+          - [Options](#options)  
+      - [Dependency](#dependency)  
+      - [Test drive](#test-drive)  
+  - [Contribute](#contribute)  
+#####   
+
 ### Usage
 
 ```bash
@@ -61,3 +71,9 @@ ipns-link [option] <port>
 
 5. Checkout https://ipns-link.herokuapp.com. Enter `PeerID` or`PeerID/file.txt` in the input box and click GET.
 
+# Contribute
+
+Lots of things to be done, lots of help needed. You may contribute to this project in [multiple](https://github.com/ipns-link/contribute) ways.
+
+[![Sponsor](https://www.buymeacoffee.com/assets/img/custom_images/yellow_img.png)](https://buymeacoffee.com/SomajitDey)
+
