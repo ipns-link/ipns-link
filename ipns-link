@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Info: See `usage` funtion below
 
-export version=0.0.1
+export version=0.0.2
 
 usage(){
   echo -e "\nBrief: Expose local http server through IPNS. Provides NAT-traversal too if needed"
@@ -60,11 +60,12 @@ parse_cmdline(){
 
 aux_node_config(){
   # Brief: Config the auxilliary node that reprovides the IPNS records of the main node at regular intervals
+  # Note: This function may be called when an existing node is sleeping. Thus, can't use ipfs cli much here
   export aux_IPFS_PATH="${HOME}"/.ipns-link
   export aux_pid_file="${aux_IPFS_PATH}/daemon-pid"
   ( # Subshell provides isolation from main environment so that we can export IPFS_PATH
     export IPFS_PATH="${aux_IPFS_PATH}"
-    if ! ipfs id; then
+    if ! [[ -f "${IPFS_PATH}"/config ]]; then
       ipfs init --profile server # Disallow local discovery & private IP addresses
       ipfs config Swarm.ConnMgr.Type none # Optimum no. of peers with no harm, because this node sleeps mostly
     fi
@@ -74,7 +75,6 @@ aux_node_config(){
 main_node_config(){
   # Brief: Configure the isolated main node if not already online
   export main_IPFS_PATH="${IPFS_PATH:-${aux_IPFS_PATH}/server}"
-  export main_node_ID="$(ipfs -c "${main_IPFS_PATH}" id -f='<id>')"
   ( # Subshell provides isolation from main environment so that we can export IPFS_PATH
     export IPFS_PATH="${main_IPFS_PATH}"
     if [[ "$(ipfs config App)" != "ipns-link" ]]; then
@@ -95,6 +95,7 @@ main_node_config(){
       ipfs config App ipns-link
     fi
   )
+  export main_node_ID="$(ipfs -c "${main_IPFS_PATH}" id -f='<id>')"
 } &>/dev/null; export -f main_node_config
 
 ipfs_daemon(){
