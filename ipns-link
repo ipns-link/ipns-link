@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Info: See `usage` funtion below
 
-export version=0.0.0
+export version=0.0.1
 
 usage(){
   echo -e "\nBrief: Expose local http server through IPNS. Provides NAT-traversal too if needed"
@@ -49,13 +49,13 @@ parse_cmdline(){
     case "${opt}" in
       v) echo "${version}"; exit;;
       c) export IPFS_PATH="${OPTARG}";;
-      g) local gateway="${OPTARG%/}";;
+      g) local gateway_opt="${OPTARG%/}";;
       h|*) usage;;
     esac
   done
   export web_port="${!OPTIND}"
   ((web_port>0)) && ((web_port<65536)) || usage
-  export gateway="${gateway:=https://ipns-link.herokuapp.com}"
+  export gateway="${gateway_opt:-https://ipns-link.herokuapp.com}"
 }; export -f parse_cmdline
 
 aux_node_config(){
@@ -187,10 +187,17 @@ pub_record(){
 } &>/dev/null 3<"${aux_pid_file}"; export -f pub_record
 
 log(){
-  date +%n%D\ %H:%M:%S:\ "${1}"%n
+  tput home; tput ed
+  echo -e "\n${banner}\n"; tput home; tput cud 7
+  echo "Checklist: This app is dumb. It doesn't even check for the following as of yet. So DIY
+1) Make sure your internet connection is ok
+2) Make sure your http-server is actually up"
+  tput cud 2
+  date +%n%D\ %H:%M:%S:\ "${1//\\n/%n}"%n
 } >&2 2>/dev/null; export -f log
 
 errexit(){
+  tput rmcup
   local msg="${1:-Unknown}"
   echo -e "\nError: ${msg}\n"
   exit 1
@@ -202,21 +209,27 @@ dep_check
 
 parse_cmdline "${@}"
 
+trap 'tput cnorm; tput rmcup' exit
+tput smcup; tput civis
+banner="IPNS-Link: Exposing http-server at 127.0.0.1:${web_port}
+Kill switch: Ctrl-C till your keyboard breaks"
+
 log "Configuring publisher node"
 aux_node_config || errexit # Must come before main_node_config as main_IPFS_PATH depends on aux_IPFS_PATH
 
 log "Configuring server node"
 main_node_config || errexit
+banner="${banner}\nIPNS-Name or PeerID: ${main_node_ID}"
 
 log "Launching server node"
 IPFS_PATH="${main_IPFS_PATH}" ipfs_daemon --routing=none --enable-namesys-pubsub || \
-  errexit "Failed. If daemon is running, do: `ipfs -c ${main_IPFS_PATH} shutdown` & retry"
+  errexit "Failed. If daemon is running, do: ipfs -c ${main_IPFS_PATH} shutdown & retry"
 
 log "Exposing http server at localhost:${web_port}"
 if ipfs -c "${main_IPFS_PATH}" p2p listen --allow-custom-protocol /http /ip4/127.0.0.1/tcp/"${web_port}" &>/dev/null; then
-  echo -e "\nIPNS-name(PeerID): ${main_node_ID}\n"
-  base36_key="$(ipfs -c "${main_IPFS_PATH}" key list -l --ipns-base=base36 | grep 'self' | cut -d' ' -f1)"
-  echo -e "\nURL: $(tput smul)${gateway}/ipns/${base36_key}/*$(tput rmul)\n"
+# Use base36_key for subdomain gateways
+# base36_key="$(ipfs -c "${main_IPFS_PATH}" key list -l --ipns-base=base36 | grep 'self' | cut -d' ' -f1)"
+  banner="${banner}\nURL: $(tput smul)${gateway}/ipns/${main_node_ID}/$(tput rmul)"
 else
   errexit "Failed to forward incoming connections to localhost:${web_port}"
 fi >&2
@@ -226,13 +239,20 @@ resume_aux_node
 
 log "Seeking public multiaddress (setting up NAT-traversal, if required)"
 while multiaddress="$(get_address)"; do
-  log "Publishing multiaddress at /ipns/${main_node_ID}"
+  log "Publishing multiaddress now. This usually takes time. So go ahead and test the URL above in a browser
+\nNote: If it is taking too long (>5min), maybe the terminal didn't refresh - press Enter to give it a shake!"
   prep_record "${multiaddress}" | pub_record
   if [[ "$(dl_address)" == "${multiaddress}" ]]; then
     log "Published"
     ipfs -c "${main_IPFS_PATH}" stats bw >&2
     pause_aux_node &
-    log "Publisher node sleeping for 15m before republishing"
-    sleep 15m
+    read -sn1 -t5 # Give the user time to read the bw stats while listening for keypress
+    log "Publisher node sleeping for 15m before republishing\nPress q to wake it up immediately and republish"
+    sleeping_from="${EPOCHSECONDS}"
+    while read -sn1 -t${sleep_for:-900}; do
+      [[ "${REPLY}" == "q" ]] && break
+      sleep_for="$((900-EPOCHSECONDS+sleeping_from))"
+    done
   fi
+  log "Seeking public multiaddress (setting up NAT-traversal, if required)"
 done
