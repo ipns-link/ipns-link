@@ -1,0 +1,532 @@
+#!/usr/bin/env -S bash -O extglob
+export LANGUAGE=C LANG=C LC_ALL=C
+export PATH="${HOME}"/.bin:"${PATH}"
+# Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
+
+export version=1.0.0
+export republish_interval=900 #seconds
+export root_repo="${HOME}/.ipns-link"
+export origin_repo="${root_repo}/origin-server"
+export publisher_repo="${root_repo}/publisher"
+export GNUPGHOME="${root_repo}/.gpg"
+export TMPDIR="${root_repo}/.runtime"
+export staging="${TMPDIR}/staged"
+export config="${root_repo}/config"
+export gw_list="${root_repo}/public-gateways"
+export publisher_pid="${publisher_repo}/daemon-pid"
+export lock="${root_repo}/.global-lock"
+export logfile="${root_repo}/log"
+
+_ipns_link_about(){
+  # Brief: Print info about this program
+  xdg-open https://github.com/ipns-link/ipns-link/blob/main/MANUAL.md & # Open the given URL in a browser
+  echo "
+  Brief: Expose http(s)-servers/web-apps to be accessed by IPNS-Link-Gateway. Dynamic hosting using IPNS.
+  Repo: $(tput smul)https://github.com/ipns-link/$(tput rmul)
+  CLI-Reference: $(tput smul)https://github.com/ipns-link/ipns-link/blob/main/MANUAL.md$(tput rmul)
+  "
+} >&2 2>/dev/null
+
+log(){
+  # Brief: Log the given message with timestamp
+  local record="${@}"
+  echo -en "$(date +%a\ %H:%M:%S) :: "
+  if grep -qwi "failed" <<< "${record}"; then
+    echo -en "$(tput setaf 1)"
+  fi
+  echo "${record}$(tput sgr0)"
+} >>"${logfile}" 2>/dev/null; export -f log
+
+errexit(){
+  # Brief: Show given message and exit
+  # Usage: errexit <msg>
+  local msg="${1:-Unknown}"
+  echo -e "\nError: ${msg}\n"
+  log "${msg}"
+  exit 1
+} >&2; export -f errexit
+
+ranpick(){
+  # Brief: Pick a word randomly from stdin
+  local input
+  read -a input
+  local size="${#input[@]}"
+  echo "${input[RANDOM%size]}"
+} < <(xargs) 2>/dev/null; export -f ranpick
+
+key_val(){
+  # Brief: Access value for given JSON key from global or key-specific config
+  # Usage: key_val <json_key> [<name>]
+  local key="${1#.}" name="${2}" json
+  if [[ -n "${name}" ]]; then
+    json="${root_repo}/${name}"
+  else
+    json="${config}"
+  fi
+  jq -er ".${key}|values" "${json}"
+} 2>/dev/null; export -f key_val
+
+yesno(){
+  # Brief: Ask user the given yes/no question and return exit status accordingly
+  read -p $'\n'"Query: ${1}(y/n) " -n1; echo >&2
+  [[ "${REPLY,,*}" == y ]] || return 1
+}; export -f yesno
+
+dl_gw_list(){
+  # Brief: Download official list of public gateways
+  local URL=https://raw.githubusercontent.com/ipns-link/gateway-registry/main/list
+  curl -sfL -o "${gw_list}" "${URL}"
+} &>/dev/null; export -f dl_gw_list
+
+_ipns_link_init(){
+  # Brief: Initialize/Setup/Configure
+  if [[ -d "${root_repo}" ]] || ls -a "${root_repo}" &>/dev/null; then 
+    yesno "Sure you wanna reset everything?" || return
+    rm -rf "${root_repo}"
+  fi
+  mkdir -p "${root_repo}"
+  
+  local editor
+  read -ep "Provide a text editor (path/cmd): " editor && command -v "${editor}" &>/dev/null || errexit "No text editor provided"
+  
+  # Download official list of public gateways
+  dl_gw_list || errexit "Failed to download public-gateway list. Retry after a while"
+
+  # Configure Origin-server
+  (export IPFS_PATH="${origin_repo}"
+    # Disallow local discovery & private IPs
+    ipfs init -e --profile server
+    ipfs config show | jq '.Addresses.NoAnnounce += ["/ip4/127.0.0.1/ipcidr/1", "/ip6/::1/ipcidr/1"]' > "${IPFS_PATH}"/.config && \
+      ipfs config replace "${IPFS_PATH}"/.config
+    # Enable ipfs-p2p command
+    ipfs config --json Experimental.Libp2pStreamMounting true
+    # For efficient streaming
+    ipfs config --bool Experimental.FilestoreEnabled true
+    ipfs config Reprovider.Strategy pinned
+    ipfs config Reprovider.Interval "${republish_interval}s"
+    ipfs config Ipns.RepublishPeriod "${republish_interval}s"
+    # No DHT
+    ipfs config Routing.Type none
+    # NAT-traversal
+    ipfs config --bool Swarm.EnableRelayHop false
+    ipfs config --bool Swarm.DisableNatPortMap false
+    ipfs config --bool Swarm.Transports.Network.Relay true
+    ipfs config --bool Swarm.EnableAutoRelay true
+    ipfs config AutoNAT.ServiceMode disabled
+    # Connection Manager
+    ipfs config Swarm.ConnMgr.Type basic
+    ipfs config Swarm.ConnMgr.GracePeriod 60m0s
+    ipfs config --json Swarm.ConnMgr.LowWater 500
+    ipfs config --json Swarm.ConnMgr.HighWater 550
+    # Unix sockets instead of ports
+    ipfs config Addresses.API "/unix/${IPFS_PATH}/api-socket"
+    ipfs config Addresses.Gateway "/unix/${IPFS_PATH}/gateway-socket"
+  )
+    
+  # Configure Publisher
+  (export IPFS_PATH="${publisher_repo}"
+    ipfs init -e --profile server
+    # Peering with content-providers to increase the swarm
+    # Ref: https://docs.ipfs.io/how-to/peering-with-content-providers/#content-provider-list
+    ipfs config --json Peering.Peers '[
+      {"ID":"QmcfgsJsMtx6qJb74akCw1M24X1zFwgGo11h1cuhwQjtJP"},
+      {"ID":"QmWaik1eJcGHq1ybTWe7sezRfqKNcDRNkeBaLnGwQJz1Cj"},
+      {"ID":"QmNfpLrQQZr5Ns9FAJKpyzgnDL2GgC6xBug1yUZozKFgu4"},
+      {"ID":"QmPo1ygpngghu5it8u4Mr3ym6SEU2Wp2wA66Z91Y1S1g29"},
+      {"ID":"QmRjLSisUCHVpFa5ELVvX3qVPfdxajxWJEHs9kN3EcxAW6"},
+      {"ID":"QmPySsdmbczdZYBpbi2oq2WMJ8ErbfxtkG8Mo192UHkfGP"},
+      {"ID":"QmSarArpxemsPESa6FNkmuu9iSE1QWqPX2R3Aw6f5jq4D5"},
+      {"ID":"QmUEMvxS2e7iDrereVYc5SWPauXPyNwxcy9BXZrC1QTcHE"},
+      {"ID":"QmNSYxZAiJHeLdkBg38roksAR9So7Y5eojks1yjEcUtZ7i"},
+      {"ID":"QmUd6zHcbkbcs7SMxwLs48qZVX3vpcM8errYS7xEczwRMA"},
+      {"ID":"QmbVWZQhCGrS7DhgLqWbgvdmKN7JueKCREVanfnVpgyq8x"},
+      {"ID":"QmdnXwLrC8p1ueiq2Qya8joNvk3TVVDAut7PrikmZwubtR"},
+      {"ID":"12D3KooWCRscMgHgEo3ojm8ovzheydpvTEqsDtq7Vby38cMHrYjt"},
+      {"ID":"12D3KooWQtpvNvUYFzAo1cRYkydgk15JrMSHp6B6oujqgYSnvsVm"},
+      {"ID":"12D3KooWQcgCwNCTYkyLXXQSZuL5ry1TzpM8PRe9dKddfsk1BxXZ"}
+      ]'
+    # Optimum no. of peers with no harm, because this node sleeps mostly
+    ipfs config Swarm.ConnMgr.Type none
+    # Unix sockets instead of ports
+    ipfs config Addresses.API "/unix/${IPFS_PATH}/api-socket"
+    ipfs config Addresses.Gateway "/unix/${IPFS_PATH}/gateway-socket"
+    touch "${publisher_pid}"
+  )
+  
+  # Create all required directories
+  mkdir -p "${GNUPGHOME}" "${TMPDIR}" 
+  
+  # Finish off with stamping current version number in config
+  jq ".version=\"${version}\"|.editor=\"${editor}\"|.Listener.port=null|.trusted_gateways=[]" <<< '{}' > "${config}"
+} >&2
+
+p_ipfs(){
+  # Brief: Wrapper function for publisher node that includes resuming it and pausing
+  # Usage: p_ipfs [<ipfs-cli options and argments>]
+  local pid="$(<"${publisher_pid}")"
+  kill -CONT "${pid}" &>/dev/null
+  timeout 30 ipfs -c "${publisher_repo}" "${@}"; local exit_code="${?}"
+  kill -STOP "${pid}" &>/dev/null
+  return "${exit_code}"
+}; export -f p_ipfs
+
+public_route(){
+  # Brief: Seek and output public route, if any. Set up peering with relay, if any.
+  # Usage: public_route
+  log "Seeking public address for Origin-server"
+  local local_addrs="$(ipfs -c "${origin_repo}" diag sys | jq -r .net.interface_addresses[])"
+  
+  pub_addrs(){
+    # Brief: Get complete public multiaddress
+    ipfs -c "${origin_repo}" id -f="<addrs>" | grep -v '^/p2p/' | grep -vf <(echo "${local_addrs}")
+  }; export -f pub_addrs
+  
+  test_conn(){
+    # Brief: Test if given multiaddresses can be connected to. Read multiaddress from stdin.
+    local multiaddress
+    while read multiaddress;do
+      p_ipfs swarm disconnect "$(grep -o '/p2p/[[:alnum:]]*$' <<< "${multiaddress}")"
+      p_ipfs swarm connect "${multiaddress}" && log "Connection test passed" && return 0
+      log "Connection test failed for ${multiaddress}"
+    done
+    return 1
+  } &>/dev/null; export -f test_conn
+  
+  net_check
+
+  local routes
+  until routes="$(pub_addrs)" && test_conn <<< "${routes}"; do
+    kill -0 "$(<"${publisher_pid}")" || return 1
+    if [[ -n "${routes}" ]];then 
+    # Peering with relay exists. So restart needed. Fresh launch clears peering with relay.
+      local buffer="$(ipfs -c "${origin_repo}" p2p ls | awk '{print $1,$3}')" # Hold current protocol and target
+      ipfs -c "${origin_repo}" shutdown ; log "Relaunching Origin-server"
+      IPFS_PATH="${origin_repo}" launcher --enable-namesys-pubsub && log "Origin-server launched" # Relaunch
+      xargs -rn2 ipfs -c "${origin_repo}" p2p listen <<< "${buffer}" # Re-establish listeners
+    else
+      sleep 1
+    fi
+  done &>/dev/null
+
+  local relay="$(grep -m1 '/p2p-circuit/p2p/[[:alnum:]]*$' <<<"${routes}")"
+  ipfs -c "${origin_repo}" swarm peering add "${relay%/p2p-circuit/*}" &>/dev/null
+
+  sed 's/\/p2p\/[^/]\+$//' <<< "${routes}" && log "Public address found"
+} 2>/dev/null; export -f public_route
+
+publish_manifest(){
+  # Brief: Publish the Manifest for the given key
+  # Usage: publish_manifest <key name>
+  local name="${1}" routes
+  routes="$(public_route)" || return 1
+  local ID="$(ipfs -c "${origin_repo}" id -f='<id>')"
+  local routes_json="$(echo -n "${routes}" | jq --raw-input --slurp 'split("\n")')"
+  local ciphertext="$(jq "del(.local)|.multiaddress.route=${routes_json}|.multiaddress.ID=\"${ID}\"" "${staging}/${name}" | \
+  gpg --batch -q --passphrase "ipns-link" --pinentry-mode loopback --cipher-algo AES128 -c | \
+  ipfs -c "${origin_repo}" multibase encode -b base64
+  )"
+  local trusted_gw="$(key_val trusted_gateways[])"
+  local random_gw="$(awk '{print $1}' "${gw_list}" | ranpick)"
+  local official_gw="$(grep -wim1 official "${gw_list}" | awk '{print $1}')"
+  local post="
+<meta http-equiv=\"refresh\" content=\"0; url=${random_gw}\">
+<title>Redirecting...</title>
+If you are not redirected automatically, follow this <a href='${official_gw}'>link</a>
+<!--ipns-link--
+${ciphertext}
+${trusted_gw}
+--ipns-link-->"
+  local cid="$(ipfs -c "${origin_repo}" add --pin=false --inline --inline-limit=10000 -Q -w --stdin-name=index.html <<< "${post}")"
+  log "Publishing Manifest for ${name}"
+  log "Published Manifest for key =" "$(p_ipfs name publish --key="${name}" -Q /ipfs/"${cid}")"
+} ; export -f publish_manifest
+
+_ipns_link_quit(){
+  # Brief: Shutdown everything
+  p_ipfs shutdown
+  local name
+  for name in $(ls "${staging}/"); do
+    _ipns_link_hide "${name}"
+  done
+  ipfs -c "${origin_repo}" shutdown
+  rm -f "${lock}"
+}
+
+_ipns_link_daemon(){
+  # Brief: Launch IPFS daemons in background
+  flock -n 10 || errexit "Another instance running"
+  : > "${logfile}"; log "Daemon started"
+  dl_gw_list & rm -rf "${TMPDIR}"/*; mkdir -p "${staging}"
+  
+  net_check(){
+    # Brief: Check internet connectivity
+    until timeout 2 dig +short google.com; do
+      log "Waiting for network"
+      kill -0 "$(<"${publisher_pid}")" || return 1
+    done
+  } &>/dev/null; export -f net_check
+
+  launcher(){
+    # Brief: ipfs-daemon launcher utility; emits PID. Takes same arguments/options as ipfs-daemon
+    if [[ -n "${IPFS_PORT}" ]]; then
+      ipfs config --json Addresses.Swarm "[\"/ip4/0.0.0.0/tcp/${IPFS_PORT}\",\"/ip6/::/tcp/${IPFS_PORT}\"]"
+    else
+      ipfs config profile apply randomports 
+    fi &>/dev/null
+    rm -f "${IPFS_PATH}"/*-socket "${IPFS_PATH}/config-pre-"*
+    net_check || return 1 # While launching Publisher, net_check iterates only once
+    [[ "$((ipfs daemon "${@}" & echo $! >&3) | grep -iom1 'Daemon is ready' & tail -f --pid=$! /dev/null)" ]]
+  } 3>&1 2>/dev/null; export -f launcher
+  
+  # Launch Publisher
+  IPFS_PATH="${publisher_repo}" launcher --enable-namesys-pubsub > "${publisher_pid}" \
+    || errexit "Failed to launch Publisher"
+  p_ipfs swarm peers &>/dev/null && log "Launched Publisher" # Initial pausing
+  
+  # Launch Origin-server
+  IPFS_PATH="${origin_repo}" IPFS_PORT="$(key_val Listener.port)" launcher --enable-namesys-pubsub >/dev/null \
+    || errexit "Failed to launch Origin-server"
+  log "Launched Origin-server"
+  
+  # Manifest Publish Loop
+  local next_at=0 key_name
+  while public_route; do
+    if ((EPOCHSECONDS > next_at)); then
+      for key_name in $(ls "${staging}"/); do
+        publish_manifest "${key_name}"
+      done
+      next_at="$((EPOCHSECONDS+republish_interval))"
+    fi
+    read -t 30 key_name && publish_manifest "${key_name}"
+  done < <(inotifywait -m -q -e close_write --format '%f' "${staging}")
+  echo > "${staging}/.ipns" # Forces inotifywait to close as it no more has any pipe to write to
+  gpgconf --kill gpg-agent
+  log "Quiting"
+} &>/dev/null 10>"${lock}"
+
+_ipns_link_log(){
+  # Brief: Monitor log in real time
+  tail -F "${logfile}"
+} 2>/dev/null;
+
+_ipns_link_config(){
+  # Brief: Edit/Show the config file (of given key)
+  # Usage: _ipns_link_config [<name>]
+  local name="${1}"
+  if [[ -n "${name}" ]] && key_val . "${name}"; then
+    yesno "Do you want to edit?" && "$(key_val editor)" "${root_repo}/${name}"
+  elif [[ -n "${name}" ]]; then
+    errexit "Broken or no JSON at ${root_repo}/${name}"
+  else
+    key_val || errexit "Failed to unmarshall JSON at ${config}"
+    yesno "Do you want to edit?" && "$(key_val editor)" "${config}"
+  fi
+} >&2
+
+_ipns_link_version(){
+  # Brief: Print version
+  echo "${version}"
+}
+
+###################################  KEY MANAGEMENT  #######################################
+
+default_config(){
+  # Brief: Prepare the default config for the given key
+  # Usage: default_config <name>
+  local name="${1}"
+  local coming_soon_page="https://cdn.pixabay.com/photo/2017/08/04/05/41/coming-soon-2579129_1280.jpg"
+  local default_host="${name}"
+  jq ".cache.path=null|.cache.CID=null|
+    .on_fail=\"${coming_soon_page}\"|
+    .stream.path=null|.stream.keyID=null|
+    .host=\"${default_host}\"|
+    .local.endpoint=\"http://localhost:80\"" <<< null > "${root_repo}/${name}"
+} &>/dev/null; export -f default_config
+
+_ipns_link_gen(){
+  # Brief: Generate keypair with given name
+  # Usage: _ipns_link_gen <name>
+  local name="${1}"
+  p_ipfs key gen "${name}" || return $?
+  default_config "${name}"
+}
+
+_ipns_link_rename(){
+  # Brief: Rename key with given name to new name
+  # Usage: _ipns_link_rename <old-name> <new-name>
+  local old_name="${1}" new_name="${2}"
+  p_ipfs key rename "${old_name}" "${new_name}" && \
+    mv "${root_repo}/${old_name}" "${root_repo}/${new_name}"
+}
+
+_ipns_link_del(){
+  # Brief: Delete key with given name
+  # Usage: _ipns_link_del <name>
+  local name="${1}"
+  p_ipfs key rm "${name}" && rm -f "${root_repo}/${name}"
+}
+
+_ipns_link_list(){
+  # Brief: List all keys
+  p_ipfs key list -l | grep -vwi 'self'
+}
+
+_ipns_link_import(){
+  # Brief: Import key with given name from the key-file
+  # Usage: _ipns_link_import <name> <path to key-file>
+  local name="${1}" path="${2}"
+  p_ipfs key import "${name}" "${path}" && default_config "${name}"
+}
+
+_ipns_link_export(){
+  # Brief: Export key with given name
+  # Usage: _ipns_link_export <name> [<path to key-file>]
+  local name="${1}" path="${2}" out; [[ -n "${path}" ]] && out="--output=${path}"
+  p_ipfs key export ${out} "${name}"
+}
+
+###################################  EXPOSE and HIDE  #######################################
+
+_ipns_link_expose(){
+  # Brief: Expose http-server with the given key (name) and address
+  # Usage: _ipns_link_expose <key name> [<BaseURL>]
+  flock -n "${lock}" -c : && errexit "No daemon running"
+  local name="${1}" proxy_pid
+  key_val . "${name}" || errexit "Failed to unmarshal JSON at ${root_repo}/${name}"
+  local fwd_dest="${2:-"$(key_val '.local.endpoint' "${name}")"}"
+  fwd_dest="${fwd_dest:-127.0.0.1:80}"
+  echo "Exposing: ${fwd_dest}"
+  local keyID="$(p_ipfs key list -l | grep -wm1 "${name}" | awk '{print $1}')"
+  [[ -n "${keyID}" ]] || errexit "No key named ${name}"
+  
+  if [[ "${fwd_dest}" =~ ^(http://|https://)?([-[:alnum:].]*)(:[[:digit:]]*)?$ ]]; then
+    local proto="${BASH_REMATCH[1]%://}"
+    local host_or_IP="${BASH_REMATCH[2]}"
+    local port="${BASH_REMATCH[3]#:}"
+    if [[ "${host_or_IP}" =~ ^([.[:digit:]]*)$ ]]; then
+      # Case: IP address is provided instead of domain/hostname
+      local multiaddress="/ip4/${host_or_IP}/tcp/${port:=80}"
+    elif [[ "${proto}" != https ]]; then
+      local multiaddress="/dns4/${host_or_IP}/tcp/${port:=80}"
+    else
+      local proxy_port=0
+      until ((proxy_port>1023)); do proxy_port="${RANDOM}";done # Getting a random unprotected port number
+      socat TCP-LISTEN:"${proxy_port}",fork,reuseaddr OPENSSL:"${host_or_IP}":"${port:=443}",verify=0 &
+      proxy_pid=$!
+      sleep 0.5 && kill -0 "${proxy_pid}" || errexit "Failed to setup proxy. Retry" # The 0.5s allows socat to setup in bg
+      local multiaddress="/ip4/127.0.0.1/tcp/${proxy_port}"
+    fi
+  else
+    errexit "Endpoint must be a socket address, <IPv4>:<port>, or BaseURL: http(s)://<domain.tld>[:<port>]"
+  fi
+
+  if ipfs -c "${origin_repo}" p2p ls | grep -qw "/x/ipns-link/${keyID}"; then errexit "Already registered"; fi
+  ipfs -c "${origin_repo}" p2p listen /x/ipns-link/"${keyID}" "${multiaddress}" &>/dev/null || errexit "Failed to set up p2p-listener"
+
+  key_val ".local.endpoint=\"${fwd_dest}\"" "${name}" | \
+  if [[ "${proto}" == https ]]; then
+    jq ".local.proxy_pid=\"${proxy_pid}\" | .host=\"${host_or_IP}\""
+  else
+    jq .
+  fi > "${staging}/${name}"
+
+  local random_gw="$(awk '{print $1}' "${gw_list}" | ranpick)"
+  echo "BaseURL: $(tput smul)${random_gw}/ipns/${keyID}/$(tput rmul)" 2>/dev/null
+}
+
+_ipns_link_exposed(){
+  # Brief: List exposed end-points against their key-names
+  local name
+  for name in $(ls "${staging}/"); do
+    echo "${name} $(jq -r '.local.endpoint|values' "${staging}/${name}")"
+  done
+}
+
+_ipns_link_hide(){
+  # Brief: Undo a previous `expose` command
+  # Usage: _ipns_link_hide <key name>
+  local name="${1}"
+  [[ -f "${staging}/${name}" ]] || errexit "No key named ${name}"
+  keyID="$(p_ipfs key list -l | grep -wm1 "${name}" | awk '{print $1}')"
+  ipfs -c "${origin_repo}" p2p close --protocol="/x/ipns-link/${keyID}" 2>/dev/null
+  kill -KILL "$(jq -r '.local.proxy_pid|values' "${staging}/${name}")" 2>/dev/null
+  rm -f "${staging}/${name}"
+}
+
+dep_check(){
+  # Brief: Check major dependencies
+  local ipfs_version quit
+  if ipfs_version=$(ipfs version --number 2>/dev/null); then
+    local req_ipfs_ver=0.10.0 # Minimum ipfs-cli version required
+    [[ "$(echo -e "${ipfs_version}\n${req_ipfs_ver}" | sort -V | head -n1)" == "${req_ipfs_ver}" ]] || \
+      { echo -e "Required: go-ipfs-cli version >= ${req_ipfs_ver}\nSuggestion: ipfs update install latest\n"; quit="yes";}
+  else
+    echo -e "Required: go-ipfs-cli\nSource: https://docs.ipfs.io/install/command-line/#linux\n"
+    quit="yes"
+  fi
+  if ! command -v curl &>/dev/null; then
+    echo -e "Required: curl\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/curl\n"
+    quit="yes"
+  fi
+  if ! command -v gpg &>/dev/null; then
+    echo -e "Required: gpg\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/gpg\n"
+    quit="yes"
+  fi
+  if ! command -v jq &>/dev/null; then
+    echo -e "Required: jq\nSource: Native package repository"
+    echo -e "Ref: https://stedolan.github.io/jq/download/\n"
+    quit="yes"
+  fi
+  if ! command -v inotifywait &>/dev/null; then
+    echo -e "Required: inotifywait\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/inotifywait\n"
+    quit="yes"
+  fi
+  if ! command -v entr &>/dev/null; then
+    echo -e "Required: entr\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/entr\n"
+    quit="yes"
+  fi
+  if ! command -v dig &>/dev/null; then
+    echo -e "Required: dig\nSource: Native package repository"
+    echo -e "Ref: https://command-not-found.com/dig\n"
+    quit="yes"
+  fi
+  [[ -v quit ]] && echo "NOTE: The dependencies may also be installed locally at ${HOME}/.bin" && exit 1
+} >&2
+
+report_updates(){
+  # Brief: Report if updates are available. Check for updates once per day, if successful.
+  local timestamp_file="${root_repo}/.last-update-check-timestamp"
+  local last_check_at="$((flock -s 0; cat)<"${timestamp_file}")" # Read with read lock
+  ((EPOCHSECONDS-last_check_at > 86400)) || return
+  local latest api_url="https://api.github.com/repos/ipns-link/ipns-link/tags"
+  if latest="$(timeout 1 curl -sfNLo- "${api_url}" | jq -r .[].name | grep -m1 '^v')"; then
+    local current="v${version}"
+    [[ "${current}" != "${latest}" ]] && echo "Updates available: ${current} -> ${latest}"
+    (flock 1; date +%s) > "${timestamp_file}" # Write with write lock
+  fi
+} >&2 2>/dev/null
+
+###################################  MAIN  #######################################
+dep_check
+
+report_updates
+
+# Check if sourcing or running as executable
+[[ $0 =~ ${BASH_SOURCE##*/}$ ]] || return
+
+# The main driver
+  subcmd="${1:-about}"
+  declare -F | awk '{print $NF}' | grep -qx "_ipns_link_${subcmd}" || errexit "No such subcommand"
+  [[ "${subcmd}" == init ]] || [[ "${version}" == "$(key_val version)" ]] || errexit "Version mismatch. Do: ipns-link init"
+  if [[ "${subcmd}" == daemon ]]; then
+    flock -n "${lock}" -c : || errexit "Another instance running"
+    _ipns_link_daemon &
+    echo "Tip: To monitor progress use: ipns-link log"
+  else
+    shift # Make the next CLI-arg after subcmd $1
+    eval "_ipns_link_${subcmd} ${@}"
+  fi
