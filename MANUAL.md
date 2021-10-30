@@ -29,6 +29,8 @@ TL;DR : See the [Quick-Start](/tutorials/QuickStart.md) tutorial
           - [`editor`](#editor)  
           - [`Listener`](#listener)  
           - [`Listener.port`](#listenerport)  
+          - [`Publisher`](#publisher)  
+          - [`Publisher.port`](#publisherport)  
         - [Key-specific config](#key-specific-config)  
           - [`cache`](#cache)  
           - [`stream`](#stream)  
@@ -187,6 +189,16 @@ The Listener IPFS node listens for and forwards incoming connections from the IP
 Holds the TCP port the Listener should listen on. This is useful when your node has a public IP, yet only a (few) TCP port(s) are open for incoming/outbound connections. 
 
 When this is unset (viz. `null` or `""`), the Listener IPFS node is setup at random TCP ports.
+
+##### `Publisher`
+
+The Publisher IPFS node is responsible for publishing the [IPNS-Link-Manifest](https://github.com/ipns-link/specs) periodically. It also provides assistance with public IP determination and connection testing - viz. IPNS-Link's very own [AutoNAT](https://docs.libp2p.io/concepts/nat/#autonat).
+
+##### `Publisher.port`
+
+Holds the TCP port the Publisher should listen on. This is useful when your node has a public IP, yet only a (few) TCP port(s) are open for incoming/outbound connections. 
+
+When this is unset (viz. `null` or `""`), the Publisher IPFS node is setup at random TCP ports.
 
 #### Key-specific config
 
