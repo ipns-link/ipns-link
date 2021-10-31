@@ -1,9 +1,10 @@
 #!/usr/bin/env -S bash -O extglob
 export LANGUAGE=C LANG=C LC_ALL=C
 export PATH="${HOME}"/.bin:"${PATH}"
+export TIMEOUT=0 # Helps with: timeout ${TIMEOUT} command
 # Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
 
-export version=1.0.1
+export version=1.0.2
 export republish_interval=900 #seconds
 export root_repo="${HOME}/.ipns-link"
 export origin_repo="${root_repo}/origin-server"
@@ -44,7 +45,7 @@ log(){
   if grep -qwi "failed" <<< "${record}"; then
     echo -en "$(tput setaf 1)"
   fi
-  echo "${record}$(tput sgr0)"
+  echo -e "${record}$(tput sgr0)"
 } >>"${logfile}" 2>/dev/null; export -f log
 
 errexit(){
@@ -118,6 +119,8 @@ _ipns_link_init(){
     # No DHT
     ipfs config Routing.Type none
     # NAT-traversal
+    ipfs bootstrap add /ip4/147.75.195.153/tcp/4001/p2p/QmW9m57aiBDHAkKj9nmFSEn7ZqrcF1fZS4bipsTCHburei
+    ## The above hardcoding of relay is not necessary. Tests without the addition were successful.
     ipfs config --bool Swarm.EnableRelayHop false
     ipfs config --bool Swarm.DisableNatPortMap false
     ipfs config --bool Swarm.Transports.Network.Relay true
@@ -185,7 +188,7 @@ p_ipfs(){
   until kill -CONT "${pid}" && timeout 1 ipfs -c "${publisher_repo}" swarm peers; do
     kill -0 "${pid}" || break # Makes sure publisher is alive, even if stopped. Otherwise offline mode 
   done &>/dev/null
-  ipfs -c "${publisher_repo}" "${@}"; local exit_code="${?}" # The actual work
+  timeout "${TIMEOUT}" ipfs -c "${publisher_repo}" "${@}"; local exit_code="${?}" # The actual work
   flock -u 0 # Drop the lock because work is done
   flock -n "${publisher_pid}" -c "kill -STOP ${pid}" &>/dev/null # Cant pause Publisher when some other worker is using it
   return "${exit_code}"
@@ -194,13 +197,13 @@ p_ipfs(){
 public_route(){
   # Brief: Seek and output public route, if any. Set up peering with relay, if any.
   # Usage: public_route
-  log "Seeking public address for Origin-server"
+  log "Seeking/checking public address for Origin-server"
   local local_addrs="$(ipfs -c "${origin_repo}" diag sys | jq -r .net.interface_addresses[])"
   local origin_ID="$(ipfs -c "${origin_repo}" id -f='<id>')"
 
   pub_addrs(){
     # Brief: Get complete public multiaddress
-    ipfs -c "${origin_repo}" id -f="<addrs>" | grep -v '^/p2p/' | grep -vf <(echo "${local_addrs}")
+    ipfs -c "${origin_repo}" id -f="<addrs>" | grep -v '^/p2p/' | grep -vf <(echo "${local_addrs}") || return 1
     # Remark: Due to a bug in go-ipfs, public IP, even if any, is replaced by p2p-circuit, once relay hop is availed
     # So, if Publisher, with AutoRelay disabled, has a public IP, let's use it
     local publisher_port="$(p_ipfs config Addresses.Swarm | jq -r .[] | grep -o '/tcp/.*$')"
@@ -210,37 +213,46 @@ public_route(){
   }; export -f pub_addrs
   
   test_conn(){
-    # Brief: Test if given multiaddresses can be connected to. Read multiaddress from stdin.
+    # Brief: Test if any of the given multiaddresses at stdin can be connected to. Fail only if all are unusable.
+    log "Checking network health"
     local multiaddress
     while read multiaddress;do
-      [[ -n "${multiaddress}" ]] || continue
+      net_check
       p_ipfs swarm disconnect "$(grep -o '/p2p/[[:alnum:]]*$' <<< "${multiaddress}")"
-      p_ipfs swarm connect "${multiaddress}" && log "Connection test passed" && return 0
-      log "Connection test failed for ${multiaddress}"
+      TIMEOUT=10 p_ipfs swarm connect "${multiaddress}" && log "Connection test passed" && return 0
+      log "Connection test failed for ${multiaddress}.\nRetrying..."
     done
     return 1
   } &>/dev/null; export -f test_conn
   
-  net_check
+  peer_with_relay(){
+    # Brief: Read a list of multiaddresses from stdin and establish long term peering with the relay node if any
+    local relay="$(grep -m1 '/p2p-circuit/p2p/[[:alnum:]]*$')"
+    ipfs -c "${origin_repo}" swarm peering add "${relay%/p2p-circuit/*}"
+  } &>/dev/null; export -f peer_with_relay
 
   local routes
   until routes="$(pub_addrs)" && test_conn <<< "${routes}"; do
     kill -0 "$(<"${publisher_pid}")" || return 1
-    if [[ -n "${routes}" ]];then 
-    # Peering with relay exists. So restart needed. Fresh launch clears peering with relay.
+    if grep -qm1 '/p2p-circuit/' <<< "${routes}";then
+    # Stale p2p-circuit. So restart needed. Fresh launch clears peering with relay.
       local buffer="$(ipfs -c "${origin_repo}" p2p ls | awk '{print $1,$3}')" # Hold current protocol and target
-      ipfs -c "${origin_repo}" shutdown ; log "Relaunching Origin-server"
-      IPFS_PATH="${origin_repo}" IPFS_PORT="$(key_val Listener.port)" launcher --enable-namesys-pubsub && \
-        log "Origin-server launched" # Relaunch
+      ipfs -c "${origin_repo}" shutdown ; log "Stale circuit-relay. Relaunching Origin-server to refresh"
+      IPFS_PATH="${origin_repo}" IPFS_PORT="$(key_val Listener.port)" launcher --enable-namesys-pubsub || \
+        errexit "Failed to launch Origin-server"
+      log "Origin-server launched" # Relaunch
+      peer_with_relay <<<"${routes}" # Up our chances of getting a relay quickly by pre-connecting with the last one
       xargs -rn2 ipfs -c "${origin_repo}" p2p listen <<< "${buffer}" # Re-establish listeners
+    elif grep -qm1 '/tcp/' <<< "${routes}"; then
+      log "Moving on to publish Manifest with a shaky TCP/IP for routing. Might get circuit-relay in a while"
+      break
     else
-      sleep 1
+      log "Polling for a circuit-relay HOP. This might take a while"
+      until pub_addrs; do sleep 1; done # Don't worry about infinite loop as _ipns_link_quit can kill it
+      sleep 5 # Give the relay node some time to set things up
     fi
   done &>/dev/null
-
-  local relay="$(grep -m1 '/p2p-circuit/p2p/[[:alnum:]]*$' <<<"${routes}")"
-  ipfs -c "${origin_repo}" swarm peering add "${relay%/p2p-circuit/*}" &>/dev/null
-
+  peer_with_relay <<< "${routes}"
   sed 's/\/p2p\/[^/]\+$//' <<< "${routes}" && log "Public address found"
 } 2>/dev/null; export -f public_route
 
@@ -291,6 +303,7 @@ _ipns_link_quit(){
 _ipns_link_daemon(){
   # Brief: Launch IPFS daemons in background
   flock -n 10 || errexit "Another instance running"
+  trap "_ipns_link_quit" exit
   : > "${logfile}"; log "Daemon started"
   dl_gw_list & rm -rf "${TMPDIR}"/*; mkdir -p "${staging}"
   
@@ -448,7 +461,7 @@ _ipns_link_expose(){
     else
       local proxy_port=0
       until ((proxy_port>1023)); do proxy_port="${RANDOM}";done # Getting a random unprotected port number
-      socat TCP-LISTEN:"${proxy_port}",fork,reuseaddr OPENSSL:"${host_or_IP}":"${port:=443}",verify=0 &
+      socat TCP-LISTEN:"${proxy_port}",fork,reuseaddr OPENSSL:"${host_or_IP}":"${port:=443}",verify=0 &>/dev/null &
       proxy_pid=$!
       sleep 0.5 && kill -0 "${proxy_pid}" || errexit "Failed to setup proxy. Retry" # The 0.5s allows socat to setup in bg
       local multiaddress="/ip4/127.0.0.1/tcp/${proxy_port}"
