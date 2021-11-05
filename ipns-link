@@ -4,7 +4,7 @@ export PATH="${HOME}"/.bin:"${PATH}"
 export TIMEOUT=0 # Helps with: timeout ${TIMEOUT} command
 # Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
 
-export version=1.0.2
+export version=1.0.3
 export republish_interval=900 #seconds
 export root_repo="${HOME}/.ipns-link"
 export origin_repo="${root_repo}/origin-server"
@@ -384,10 +384,9 @@ default_config(){
   # Brief: Prepare the default config for the given key
   # Usage: default_config <name>
   local name="${1}"
-  local coming_soon_page="https://cdn.pixabay.com/photo/2017/08/04/05/41/coming-soon-2579129_1280.jpg"
   local default_host="${name}"
   jq ".cache.path=null|.cache.CID=null|
-    .on_fail=\"${coming_soon_page}\"|
+    .on_fail=null|
     .stream.path=null|.stream.keyID=null|
     .host=\"${default_host}\"|
     .local.endpoint=\"http://localhost:80\"" <<< null > "${root_repo}/${name}"
@@ -501,6 +500,13 @@ _ipns_link_hide(){
   ipfs -c "${origin_repo}" p2p close --protocol="/x/ipns-link/${keyID}" 2>/dev/null
   kill -KILL "$(jq -r '.local.proxy_pid|values' "${staging}/${name}")" 2>/dev/null
   rm -f "${staging}/${name}"
+}
+
+_ipns_link_cache(){
+  # Brief: Cache given directory for efficient delivery over IPFS
+  # Usage: _ipfs_link_cache <path/to/directory>
+  # TODO: Couldn't use --fscache --nocopy, i.e. filestore due to "cant add file outside root error"
+  ipfs -c "${origin_repo}" add -r -Q --progress "${1}"
 }
 
 dep_check(){

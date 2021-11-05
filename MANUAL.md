@@ -22,6 +22,7 @@ TL;DR : See the [Quick-Start](/tutorials/QuickStart.md) tutorial
         - [`expose`](#expose)  
         - [`hide`](#hide)  
         - [`config`](#config)  
+        - [`cache`](#cache)  
         - [`version`](#version)  
       - [Config file](#config-file)  
         - [General config](#general-config)  
@@ -156,6 +157,14 @@ ipns-link config [<keyName>]
 
 Shows/edits configuration associated with the given key. If no `<keyName>` is provided, shows/edits the global configuration. See the [Config file](#config-file) section for details.
 
+#### `cache`
+
+```bash
+ipns-link cache <path/to/directory/or/file>
+```
+
+Caches file or directory at given path for efficient delivery over IPFS.
+
 #### `version`
 
 ```bash
@@ -206,9 +215,11 @@ Each key you generate or import has a config file associated with it. The config
 
 ##### `cache`
 
-Instructs IPNS-Link-Gateways to serve *GET* requests for paths with prefix `cache.path` from the directory hosted on IPFS that has CID=`cache.CID`. This is to be used to serve static content efficiently. 
+Instructs IPNS-Link-Gateways to serve *GET* requests for paths with prefix `cache.path` from the directory hosted on IPFS that has CID=`cache.CID`. This is to be used to serve static content efficiently.
 
 **Example**: Put the static images, css, javascripts of your site in a directory, and pin the directory to be served via IPFS. Note the directory CID and put it as the value for `cache.CID`. To let *GET* requests with path `/static/*` be served from IPFS, add `/static/` as the value for `cache.path`.
+
+**Note**: For optimum performance, cache the directory locally with `ipns_link cache <path/to/directory>`.
 
 ##### `stream`
 
