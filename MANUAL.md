@@ -62,10 +62,10 @@ Initializes/resets `ipns-link` on your machine. This is akin to `ipfs init` or `
 #### `daemon`
 
 ```bash
-ipns-link daemon
+ipns-link daemon [-n]
 ```
 
-Launches the exposer engine on the background.
+Launches the exposer engine on the background. If the `-n` flag is provided, it invalidates all prior caches in the gateways.
 
 #### `log`
 

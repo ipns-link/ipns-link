@@ -4,7 +4,7 @@ export PATH="${HOME}"/.bin:"${PATH}"
 export TIMEOUT=0 # Helps with: timeout ${TIMEOUT} command
 # Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
 
-export version=1.0.3
+export version=1.0.4
 export republish_interval=900 #seconds
 export root_repo="${HOME}/.ipns-link"
 export origin_repo="${root_repo}/origin-server"
@@ -92,6 +92,7 @@ dl_gw_list(){
 _ipns_link_init(){
   # Brief: Initialize/Setup/Configure
   if [[ -d "${root_repo}" ]] || ls -a "${root_repo}" &>/dev/null; then 
+    echo "Warning: Make sure you backup all key-specific config files in ${root_repo} and export all important keys before proceeding."
     yesno "Sure you wanna reset everything?" || return
     rm -rf "${root_repo}"
   fi
@@ -197,6 +198,7 @@ p_ipfs(){
 public_route(){
   # Brief: Seek and output public route, if any. Set up peering with relay, if any.
   # Usage: public_route
+  dl_gw_list
   log "Seeking/checking public address for Origin-server"
   local local_addrs="$(ipfs -c "${origin_repo}" diag sys | jq -r .net.interface_addresses[])"
   local origin_ID="$(ipfs -c "${origin_repo}" id -f='<id>')"
@@ -580,6 +582,12 @@ report_updates
   [[ "${subcmd}" == init ]] || [[ "${version}" == "$(key_val version)" ]] || errexit "Version mismatch. Do: ipns-link init"
   if [[ "${subcmd}" == daemon ]]; then
     flock -n "${lock}" -c : || errexit "Another instance running"
+    if grep -w -m1 -q -e '-n' <<< "${@}"; then
+      dummy_name="old-peerID-${RANDOM}"
+      ipfs -c "${origin_repo}" key rotate --oldkey="${dummy_name}" && \
+      ipfs -c "${origin_repo}" key rm "${dummy_name}" &>/dev/null && \
+      echo "Status: Listener's got a new PeerID. Already cached Manifests in gateways would no more work."
+    fi
     _ipns_link_daemon & echo $! | tee "${lock}"
     echo "Tip: To monitor progress use: ipns-link log"
   else
