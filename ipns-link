@@ -4,7 +4,7 @@ export PATH="${HOME}"/.bin:"${PATH}"
 export TIMEOUT=0 # Helps with: timeout ${TIMEOUT} command
 # Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
 
-export version=1.0.4
+export version=1.0.5
 export republish_interval=900 #seconds
 export root_repo="${HOME}/.ipns-link"
 export origin_repo="${root_repo}/origin-server"
@@ -123,9 +123,12 @@ _ipns_link_init(){
     ipfs bootstrap add /ip4/147.75.195.153/tcp/4001/p2p/QmW9m57aiBDHAkKj9nmFSEn7ZqrcF1fZS4bipsTCHburei
     ## The above hardcoding of relay is not necessary. Tests without the addition were successful.
     ipfs config --bool Swarm.EnableRelayHop false
+    ipfs config --bool Swarm.RelayService.Enabled false
     ipfs config --bool Swarm.DisableNatPortMap false
     ipfs config --bool Swarm.Transports.Network.Relay true
     ipfs config --bool Swarm.EnableAutoRelay true
+    ipfs config --bool Swarm.RelayClient.Enabled true
+    ipfs config --bool Swarm.EnableHolePunching true
     ipfs config AutoNAT.ServiceMode disabled
     # Connection Manager
     ipfs config Swarm.ConnMgr.Type basic
@@ -135,13 +138,14 @@ _ipns_link_init(){
     # Unix sockets instead of ports
     ipfs config Addresses.API "/unix/${IPFS_PATH}/api-socket"
     ipfs config Addresses.Gateway "/unix/${IPFS_PATH}/gateway-socket"
-  )
+  ) &>/dev/null
     
   # Configure Publisher
   (export IPFS_PATH="${publisher_repo}"
     ipfs init -e --profile server
     # Disabling AutoRelay as it is not needed. Also this has an added benefit - see pub_addrs function
     ipfs config --bool Swarm.EnableAutoRelay false
+    ipfs config --bool Swarm.RelayClient.Enabled false
     # Peering with content-providers to increase the swarm
     # Ref: https://docs.ipfs.io/how-to/peering-with-content-providers/#content-provider-list
     ipfs config --json Peering.Peers '[
@@ -167,7 +171,7 @@ _ipns_link_init(){
     ipfs config Addresses.API "/unix/${IPFS_PATH}/api-socket"
     ipfs config Addresses.Gateway "/unix/${IPFS_PATH}/gateway-socket"
     touch "${publisher_pid}"
-  )
+  ) &>/dev/null
   
   # Create all required directories
   mkdir -p "${GNUPGHOME}" "${TMPDIR}" 
