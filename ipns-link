@@ -4,13 +4,14 @@ export PATH="${HOME}"/.bin:"${PATH}"
 export TIMEOUT=0 # Helps with: timeout ${TIMEOUT} command
 # Remark: All public-facing functions/subcmds are prefixed with _ipns_link_ and is not exported
 
-export version=1.0.5
+export version=1.0.6
 export republish_interval=900 #seconds
 export root_repo="${HOME}/.ipns-link"
 export origin_repo="${root_repo}/origin-server"
 export publisher_repo="${root_repo}/publisher"
 export GNUPGHOME="${root_repo}/.gpg"
 export TMPDIR="${root_repo}/.runtime"
+export addr_flag="${TMPDIR}/new_multiaddress.flag"
 export staging="${TMPDIR}/staged"
 export config="${root_repo}/config"
 export gw_list="${root_repo}/public-gateways"
@@ -255,6 +256,7 @@ public_route(){
     else
       log "Polling for a circuit-relay HOP. This might take a while"
       until pub_addrs; do sleep 1; done # Don't worry about infinite loop as _ipns_link_quit can kill it
+      touch "${addr_flag}"
       sleep 5 # Give the relay node some time to set things up
     fi
   done &>/dev/null
@@ -346,7 +348,8 @@ _ipns_link_daemon(){
   # Manifest Publish Loop
   local next_at=0 key_name
   while public_route; do
-    if ((EPOCHSECONDS > next_at)); then
+    if ((EPOCHSECONDS > next_at)) || [[ -e "${addr_flag}" ]]; then
+      rm -f "${addr_flag}"
       for key_name in $(ls "${staging}"/); do
         publish_manifest "${key_name}"
       done
@@ -486,7 +489,8 @@ _ipns_link_expose(){
   fi > "${staging}/${name}"
 
   local random_gw="$(awk '{print $1}' "${gw_list}" | ranpick)"
-  echo "BaseURL: $(tput smul)${random_gw}/ipns/${keyID}/$(tput rmul)" 2>/dev/null
+  echo "Web URL: $(tput smul)${random_gw}/ipns/${keyID}/$(tput rmul)" 2>/dev/null
+  echo "Port forward: $(tput smul)${random_gw}/prep/${keyID}$(tput rmul)" 2>/dev/null
 }
 
 _ipns_link_exposed(){
