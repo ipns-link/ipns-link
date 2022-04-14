@@ -66,7 +66,7 @@ ipns-link daemon
 
 #### Generate key
 
-Let's now generate the IPNS-key the would later expose our server. Because the key is hard to remember, we must give it a human-friendly name, e.g. `my-site`.
+Let's now generate the Origin's/service's keypair that will later expose our Origin. Because the key is hard to remember, we must give it a human-friendly name, e.g. `my-site`.
 
 ```bash
 ipns-link gen my-site
@@ -94,7 +94,7 @@ There are two ways to do this:
    ipns-link expose my-site localhost:8000
    ```
 
-If everything goes alright, our site should be accessible using any IPNS-Link-Gateway within a few minutes. Try the URL shown at the screen, for example. You can even grab the `/ipns/<key>` part from the URL and use any good old [IPFS-gateway](https://ipfs.github.io/public-gateway-checker/), e.g. `https://ipfs.io/ipns/<key>/`. It would redirect the browser to an IPNS-Link-Gateway.
+If everything goes alright, our site should be accessible using any IPNS-Link Gateway within a few minutes. Try the URL shown at the screen, for example. You can even grab the `/ipns/<key>` part from the URL and use any good old [IPFS-gateway](https://ipfs.github.io/public-gateway-checker/), e.g. `https://ipfs.io/ipns/<key>/`. It would redirect the browser to an IPNS-Link Gateway.
 
 **Note**: If you wanna expose `localhost:80` instead, just do `ipns-link expose my-site`, because that endpoint is the default endpoint.
 
@@ -129,4 +129,4 @@ When you need to shutdown everything, just
 ```bash
 ipns-link quit
 ```
-
+
